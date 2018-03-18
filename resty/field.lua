@@ -13,7 +13,7 @@ local rawset = rawset
 local ngx_localtime = ngx.localtime
 local ngx_time = ngx.time
 
-local version = '1.0'
+local version = '1.1'
 
 local function array(t)
     return setmetatable(t or {}, empty_array_mt)
