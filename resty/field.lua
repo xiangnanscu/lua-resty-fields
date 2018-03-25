@@ -13,7 +13,7 @@ local rawset = rawset
 local ngx_localtime = ngx.localtime
 local ngx_time = ngx.time
 
-local version = '1.1'
+local version = '1.2'
 
 local function array(t)
     return setmetatable(t or {}, empty_array_mt)
@@ -463,7 +463,7 @@ local function foreignkey_db_to_lua_validator(fk_model)
     local function __index(t, key)
         -- perform sql only when key is in fields:
         if fk_model.fields_dict[key] then
-            local res, err = fk_model:get('id='..t.id)
+            local res, err = fk_model.get('id='..t.id)
             if not res then
                 return nil
             end
@@ -479,7 +479,7 @@ local function foreignkey_db_to_lua_validator(fk_model)
     -- local function __newindex(t, key, value)
     --     -- perform sql only when key is in fields:
     --     if fk_model.fields_dict[key] then
-    --         local res, err = fk_model:get('id='..t.id)
+    --         local res, err = fk_model.get('id='..t.id)
     --         if not res then
     --             return nil
     --         end
