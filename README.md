@@ -19,12 +19,10 @@ class basefield defines common options and validate logic for all field classes.
 `string`. Name used as form label. `field.name` will be used if not provided.
 ### field.default
 `any`. default value when method `field.lua_to_db` is called. If it's a function, returned value of `field.default()` is used, otherwise `field.default` is used.
-### field.new
-`method`. Used to create a field instance.
 ### field.error_messages
 `table`. Custom the error messages.
 ### field.validators
-`table`. Should be a table like `{client_to_lua:{...}, lua_to_db:{...}, db_to_lua:{...}, lua_to_client:{...}}` where `{...}` should be a list of [validators](https://github.com/openresty/lua-resty-validator)
+`table`. Should be a table like `{client_to_lua:{...}, lua_to_db:{...}, db_to_lua:{...}, lua_to_client:{...}}` where `{...}` should be a list of [validators](https://github.com/openresty/lua-resty-validator). You can also define validators like `{...}` which is equivalent to `{client_to_lua:{...}}`.
 ### field.get_empty_value_to_update
 `method`. If an empty value(usually empty string) is provided for this field, what value should be actually sent to database.
 ### field.choices
