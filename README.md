@@ -20,7 +20,7 @@ class basefield defines common options and validate logic for all field classes.
 ### field.default
 `any`. default value when method `field.lua_to_db` is called. If it's a function, returned value of `field.default()` is used, otherwise `field.default` is used.
 ### field.error_messages
-`table`. Custom the error messages.
+`table`. Custom the error messages like `{maxlength:'too long', required:'cannot be blank'}`.Currently you can set required|maxlength|minlength|length|max|min.
 ### field.validators
 `table`. Should be a table like `{client_to_lua:{...}, lua_to_db:{...}, db_to_lua:{...}, lua_to_client:{...}}` where `{...}` should be a list of [validators](https://github.com/xiangnanscu/lua-resty-validator). You can also define validators like `{...}` which is equivalent to `{client_to_lua:{...}}`.
 ### field.get_empty_value_to_update
@@ -35,18 +35,31 @@ shallow copy of the table passed to `field.new` method.
 ## string
 ### string.(maxlength|minlength|length)
 `number`. define max length/min length/length of this field. You **must** define at least one of them.
+### string.pattern
+`string`. Define a PCRE regex for this field. Used in [ngx.re.match](https://github.com/openresty/lua-nginx-module#ngxrematch) with `jo`.
 ### string.trim
-`true` or `false`. Default is `true`.
-### string.no_spaces
+`true` or `false`. Whether delete leading and trailing whitespaces.Default is `true`.
+### string.no_whitespaces
 `true` or `false`. Whether delete all whitespaces in this field. Default is `false`.
 ## integer
+### integer.(min|max)
+`number`. max/min value of this field.
 ## float
+### float.(min|max)
+`number`. max/min value of this field.
+### float.precison
+`number`. precison of float. Database related. 
 ## datetime
+### datetime.timezon
+auto_now_add
 ## date
 ## time
 ## json
+inherited from `string` field. it's implemented as `varchar` in database. Default maxlength is 3000.
 ## array
+inherited from `json` field. 
 ## table
+inherited from `array` field. You should always define `subfields` for this field.
 ## foreignkey
 ## boolean
 ## alioss
