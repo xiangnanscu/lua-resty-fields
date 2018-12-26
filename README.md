@@ -50,10 +50,20 @@ shallow copy of the table passed to `field.new` method.
 ### float.precison
 `number`. precison of float. Database related. 
 ## datetime
-### datetime.timezon
-auto_now_add
+### datetime.timezone
+`true` or `false`. Used when creating database tables.
+### datetime.precision
+`number`. Used when creating database tables.
+### datetime.auto_now_add
+`true` or `false`. If true, automatically set current time when creating a record. Note, `client_to_lua` will be set by this flag, so you shouldn't provide any validators in this stage.
+### datetime.auto_now
+`true` or `false`. If true, automatically set current time when updating a record. Note, `client_to_lua` and `lua_to_db` will be set by this flag, so you shouldn't provide any validators in these two stages.
 ## date
 ## time
+### datetime.timezone
+`true` or `false`. Used when creating database tables.
+### datetime.precision
+`number`. Used when creating database tables.
 ## json
 inherited from `string` field. it's implemented as `varchar` in database. Default maxlength is 3000.
 ## array
@@ -61,5 +71,8 @@ inherited from `json` field.
 ## table
 inherited from `array` field. You should always define `subfields` for this field.
 ## foreignkey
+### foreignkey.reference
+A [Model](https://github.com/xiangnanscu/lua-resty-model).
+### foreignkey.reference_column
+Which column is refered. Default is `id`. Note valid field type is string, integer, float, datetime, date and time.
 ## boolean
-## alioss
