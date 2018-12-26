@@ -5,8 +5,19 @@ Clean the value via a field object you defined.
 [lua-resty-validator](https://github.com/openresty/lua-resty-validator)
 
 # Synopsis
-to be filled.
-# class
+```
+local Field = require "resty.field"
+local username = Field.string{maxlength=3, no_whitespaces=true}
+local session = Field.json{}
+local value, err = username.client_to_lua('abcd')
+-- value will be nil, and err will be an error message
+local s, err = session.client_to_lua('{"foo":"bar"}')
+-- s will be a lua table {foo='bar'}, err will be nil
+local res, err = session.lua_to_db(s)
+-- res will be a string '{"foo":"bar"}' again and is ready to be saved as varchar in database.
+```
+# field classes
+use them like
 ## basefield
 class basefield defines common options and validate logic for all field classes.
 ### field.required
