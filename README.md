@@ -9,12 +9,13 @@ Clean the value via a field object you defined.
 local Field = require "resty.field"
 local username = Field.string{maxlength=3, no_whitespaces=true}
 local session = Field.json{}
-local value, err = username.client_to_lua('abcd')
--- value will be nil, and err will be an error message
-local s, err = session.client_to_lua('{"foo":"bar"}')
--- s will be a lua table {foo='bar'}, err will be nil
-local res, err = session.lua_to_db(s)
--- res will be a string '{"foo":"bar"}' again and is ready to be saved as varchar in database.
+local add_suffix = function(v) return v..' address suffix.' end
+local address = Field.string{maxlength=50, validators={add_suffix}}
+local res = {}
+res.v1, res.e1 = username.client_to_lua('abcd')
+res.v2, res.e2 = session.client_to_lua('{"foo":"bar"}')
+res.v3, res.e3 = session.lua_to_db(res.v2)
+res.v4, res.e4 = address.client_to_lua('No.1 street')
 ```
 # field classes
 use them like
