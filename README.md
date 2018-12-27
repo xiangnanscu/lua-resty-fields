@@ -1,5 +1,5 @@
 # lua-resty-field
-Clean the value via a field object you defined.
+Transform value via a field object.
 
 # Requirements
 [lua-resty-validator](https://github.com/openresty/lua-resty-validator)
@@ -16,6 +16,7 @@ res.v1, res.e1 = username.client_to_lua('abcd')
 res.v2, res.e2 = session.client_to_lua('{"foo":"bar"}')
 res.v3, res.e3 = session.lua_to_db(res.v2)
 res.v4, res.e4 = address.client_to_lua('No.1 street')
+-- res will be: {"e1":"字数不能多于3个","v3":"{\"foo\":\"bar\"}","v2":{"foo":"bar"},"v4":"No.1 street address suffix."}
 ```
 # field classes
 use them like
