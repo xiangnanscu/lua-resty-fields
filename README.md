@@ -1,5 +1,5 @@
 # lua-resty-field
-Transform value via a field object.
+Transform value via a field object. Used by [lua-resty-model](https://github.com/xiangnanscu/lua-resty-model)
 
 # Requirements
 [lua-resty-validator](https://github.com/openresty/lua-resty-validator)
@@ -19,9 +19,8 @@ res.v4, res.e4 = address.client_to_lua('No.1 street')
 -- res will be: {"e1":"字数不能多于3个","v3":"{\"foo\":\"bar\"}","v2":{"foo":"bar"},"v4":"No.1 street address suffix."}
 ```
 # field classes
-use them like
 ## basefield
-class basefield defines common options and validate logic for all field classes.
+basefield defines common options and validate logic for all field classes. Usually you don't need this field. It's mainly for creating concrete field class like `string` or your own one.
 ### field.required
 `true` or `false`. Specify whether value should be provided for this field.
 ### field.null
