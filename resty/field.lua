@@ -1,545 +1,1405 @@
-local Validator = require "resty.validator"
-local empty_array_mt = require "cjson".empty_array_mt
-local cjson_encode = require "cjson.safe".encode
-local cjson_decode = require "cjson.safe".decode
+local clone = require "table.clone"
+local isarray = require("table.isarray")
+local Validators = require "resty.validator"
+local Array = require "resty.array"
+local dotenv = require("resty.dotenv")
+local get_payload = require "resty.alioss".get_payload
 local string_format = string.format
 local table_concat = table.concat
 local table_insert = table.insert
-local next = next
 local ipairs = ipairs
 local setmetatable = setmetatable
 local type = type
 local rawset = rawset
 local ngx_localtime = ngx.localtime
-local ngx_time = ngx.time
 
-local version = '1.2'
-
-local function array(t)
-    return setmetatable(t or {}, empty_array_mt)
+local JSON_ENV
+local function getenv(key)
+  if not JSON_ENV then
+    local json = dotenv { path = { '.env', '.env.local' } }
+    JSON_ENV = json
+  end
+  if key then
+    return JSON_ENV[key]
+  else
+    return JSON_ENV
+  end
 end
+
+local function dict(a, b)
+  local t = clone(a)
+  if b then
+    for k, v in pairs(b) do
+      t[k] = v
+    end
+  end
+  return t
+end
+
 local function list(a, b)
-    local t = {}
+  local t = clone(a)
+  if b then
+    for _, v in ipairs(b) do
+      t[#t + 1] = v
+    end
+  end
+  return t
+end
+
+local function map(tbl, func)
+  local res = Array()
+  for i = 1, #tbl do
+    res[i] = func(tbl[i])
+  end
+  return res
+end
+
+---@param s string
+---@param sep? string
+---@return array
+local function split(s, sep)
+  local res = {}
+  sep = sep or ""
+  local i = 1
+  local a, b
+  while true do
+    a, b = s:find(sep, i, true)
     if a then
-        for k, v in ipairs(a) do
-            t[#t+1] = v
-        end
-    end
-    if b then
-        for k, v in ipairs(b) do
-            t[#t+1] = v
-        end
-    end
-    return t
-end
-
-local VALIDATE_STAGES = {'client_to_lua','lua_to_db','db_to_lua','lua_to_client'}
-
-local function __call(cls, attrs)
-    return cls:new(attrs)
-end
-
-local basefield = {}
-basefield.__index = basefield
-basefield.__call = __call
-function basefield.new(cls, attrs)
-    local self = setmetatable(attrs, cls)
-    self:_check_attributes()
-    self.error_messages = self.error_messages or {}
-    if self.null == nil then
-        self.null = true
-    end
-    self.db_type = self.db_type or self.type
-    self.label = self.label or self[2] or self.name
-    if self.default then
-        if type(self.default) == 'function' then
-            self.get_default = function (self) return self.default() end
-        else
-            self.get_default = function (self) return self.default end
-        end
-    end
-    if self.validators == nil then
-        self.validators = {}
-    end
-    for i, validate_stage in ipairs(VALIDATE_STAGES) do
-        if self[validate_stage] then 
-            -- user provide custom function, so skip composing validators 
-            -- and just register this function in validators as the only validator
-            self.validators[validate_stage] = {self[validate_stage]}
-        else
-            local user_validators = self.validators[validate_stage] or {}
-            self.validators[validate_stage] = {}
-            self['_make_native_validators_for_'..validate_stage](self, self.validators[validate_stage])
-            self['_compose_validators_for_'..validate_stage](self, user_validators)
-        end
-    end
-    return self            
-end
-function basefield.get_empty_value_to_update(self)
-    return ''
-end
-local function normalize_choices(c)
-    if type(c) == 'function' then
-        -- dynamic choices
-        return c
-    elseif type(c[1]) == nil then
-    -- {a = true, b = true} => {{'a', 'a'},{'b','b'}}
-    -- {a='foo', b = true, c = 1} => {{'foo', 'a'},{'b','b'},{1,'c'}}
-        local nc = array()
-        for k, v in pairs(c) do
-            if v == true then
-                nc[#nc+1] = {k, k}
-            else
-                nc[#nc+1] = {v, k}
-            end
-        end
-        return nc
-    elseif type(c[1]) ~= 'table' then
-    -- {'a','b'}  => {{'a', 'a'},{'b','b'}}
-        local nc = array()
-        for i, v in ipairs(c) do
-            nc[i] = {v, tostring(v)}
-        end
-        return nc      
+      local e = s:sub(i, a - 1)
+      i = b + 1
+      res[#res + 1] = e
     else
-        -- standard table form
-        return array(c)
+      res[#res + 1] = s:sub(i)
+      return res
     end
-end
-function basefield._check_attributes(self)
-    self.name = self.name or self[1] -- for easy defination of name
-    assert(self.name, 'you must define `name` for a field')
-    if self.choices then
-        -- currently only support basic type choices. 
-        -- i.e. string and number, not table
-        assert(
-            type(self.choices)=='table' or 
-            type(self.choices)=='function', 
-            '`choices` must be a table or function')
-        self.choices = normalize_choices(self.choices)
-    end
-end
-function basefield._make_native_validators_for_lua_to_db(self, validators)
-
-end
-function basefield._make_native_validators_for_lua_to_client(self, validators)
-
-end
-function basefield._make_native_validators_for_db_to_lua(self, validators)
-    -- ** null_converter是否适用于postgresql 
-    table.insert(validators, 1, Validator.null_converter)
-end
-function basefield._make_native_validators_for_client_to_lua(self, validators)
-    if self.required then
-        table.insert(validators, 1, Validator.required{
-            name = self.label, 
-            message = self.error_messages.required})
-    else
-        table.insert(validators, 1, Validator.not_required)
-    end
-    if self.choices then
-        -- choices应是最后一个验证环节
-        if type(self.choices) == 'function' then
-            table.insert(validators, self:_get_dynamic_choices_validator())
-        else
-            table.insert(validators, self:_get_static_choices_validator())
-        end
-    end
-end
-function basefield._get_dynamic_choices_validator(self)
-    -- here, model as a runtime env
-    return function (value, model)
-        local choices = self.choices(model)
-        if not choices then
-            return value -- **如果没有设定, 默认不需要检验
-        end
-        if not self:match_choices(choices, value) then
-            return nil, '无效选择项'
-        else
-            return value
-        end
-    end
-end
-function basefield._get_static_choices_validator(self)
-    local choices = {} 
-    local labels = {} 
-    for i, v in ipairs(self.choices) do
-        choices[v[1]] = true
-        labels[#labels+1] = v[2]
-    end
-    local message = string_format('无效选择项, 请从"%s"之中选择', table_concat(labels, "," )) 
-    return function (value)
-        if not self:match_choices(choices, value) then
-            return nil, message
-        else
-            return value
-        end
-    end
-end
-function basefield.match_choices(self, choices, value)
-    return choices[value]
-end
--- db_to_lua和client_to_lua是field优先, lua_to_db和lua_to_client是user优先
-function basefield._compose_validators_for_db_to_lua(self, user_validators)
-    self.validators.db_to_lua = list(self.validators.db_to_lua, user_validators)
-    return self:_compose_validators_for_stage('db_to_lua')
-end
-function basefield._compose_validators_for_client_to_lua(self, user_validators)
-    self.validators.client_to_lua = list(self.validators.client_to_lua, user_validators)
-    return self:_compose_validators_for_stage('client_to_lua')
-end
-function basefield._compose_validators_for_lua_to_db(self, user_validators)
-    self.validators.lua_to_db = list(user_validators, self.validators.lua_to_db)
-    return self:_compose_validators_for_stage('lua_to_db')
-end
-function basefield._compose_validators_for_lua_to_client(self, user_validators)
-    self.validators.lua_to_client = list(user_validators, self.validators.lua_to_client)
-    return self:_compose_validators_for_stage('lua_to_client')
-end
-function basefield._compose_validators_for_stage(self, validate_stage)
-    local validators = self.validators[validate_stage]
-    local n = #validators
-    if n == 0 then
-        self[validate_stage] = Validator.as_is
-    elseif n == 1 then
-        self[validate_stage] = validators[1]
-    else     
-        local function composed_validator(value, model)
-            local err
-            for i, validator in ipairs(validators) do
-                value, err = validator(value, model)
-                if err ~= nil then
-                    return nil, err
-                elseif value == nil then
-                    -- not-required validator, skip the rest validations
-                    return
-                end
-            end
-            return value
-        end
-        self[validate_stage] = composed_validator
-    end
+  end
 end
 
-
-local string = setmetatable({type='string', db_type='varchar'}, basefield)
-string.__index = string
-string.__call = __call
-function string._check_attributes(self)
-    basefield._check_attributes(self)
-    assert(self.maxlength, 'string field must define `maxlength`')
-end
-function string._make_native_validators_for_client_to_lua(self, validators)
-    if self.minlength and self.minlength > 0 then
-        table.insert(validators, 1, Validator.minlength{
-            name = self.label, 
-            message = self.error_messages.minlength, 
-            number = self.minlength})
-    end 
-    if self.maxlength then
-        table.insert(validators, 1, Validator.maxlength{
-            name = self.label, 
-            message = self.error_messages.maxlength, 
-            number = self.maxlength})
-    end
-    basefield._make_native_validators_for_client_to_lua(self, validators)
-end
-
-
-local integer = setmetatable({type='integer'}, basefield)
-integer.__index = integer
-integer.__call = __call
-function integer._make_native_validators_for_client_to_lua(self, validators)
-    if self.min then
-        table.insert(validators, 1, Validator.min{
-            name = self.label, 
-            message = self.error_messages.min, 
-            number = self.min})
-    end 
-    if self.max then
-        table.insert(validators, 1, Validator.max{
-            name = self.label, 
-            message = self.error_messages.max, 
-            number = self.max})
-    end
-    table.insert(validators, 1, Validator.integer)
-    basefield._make_native_validators_for_client_to_lua(self, validators)
-end
-
-
-local float = setmetatable({type='float'}, basefield)
-float.__index = float
-float.__call = __call
-function float._make_native_validators_for_client_to_lua(self, validators)
-    if self.min then
-        table.insert(validators, 1, Validator.min{
-            name = self.label, 
-            message = self.error_messages.min, 
-            number = self.min})
-    end 
-    if self.max then
-        table.insert(validators, 1, Validator.max{
-            name = self.label, 
-            message = self.error_messages.max, 
-            number = self.max})
-    end
-    table.insert(validators, 1, Validator.number)
-    basefield._make_native_validators_for_client_to_lua(self, validators)
-end
-
-
-local json = setmetatable({type='json', db_type="varchar"}, string)
-json.__index = json
-json.__call = __call
-function json.new(cls, attrs)
-    if attrs.maxlength == nil then
-        attrs.maxlength = 3000
-    end
-    return string.new(cls, attrs)
-end
-function json._make_native_validators_for_client_to_lua(self, validators)
-    table.insert(validators, 1, Validator.decode)
-    string._make_native_validators_for_client_to_lua(self, validators)
-end
-function json._make_native_validators_for_db_to_lua(self, validators)
-    table.insert(validators, 1, Validator.decode)
-    string._make_native_validators_for_db_to_lua(self, validators)
-end
-function json._make_native_validators_for_lua_to_db(self, validators)
-    table.insert(validators, Validator.encode)
-    string._make_native_validators_for_lua_to_db(self, validators)
-end
-
-
-local array = setmetatable({type='array', db_type="varchar"}, json)
-array.__index = array
-array.__call = __call
-function array._make_native_validators_for_client_to_lua(self, validators)
-    if self.required then
-        table.insert(validators, 1, Validator.forbid_empty_array{
-            name = self.label, 
-            message = self.error_messages.required})
-    end
-    table.insert(validators, 1, Validator.encode_as_array)
-    json._make_native_validators_for_client_to_lua(self, validators)
-end
-function array._make_native_validators_for_db_to_lua(self, validators)
-    table.insert(validators, 1, Validator.encode_as_array)
-    json._make_native_validators_for_db_to_lua(self, validators)
-end
--- function array._make_native_validators_for_lua_to_db(self, validators)
---     -- **暂时不放出此方法, 因为client_to_lua已经保证了空表会被编码为[]
---     -- 除非以后出现单独使用lua_to_db方法的需求
---     table.insert(validators, Validator.encode_as_array)
---     json._make_native_validators_for_lua_to_db(self, validators)
--- end
-function array.match_choices(self, choices, value)
-    for i, v in ipairs(value) do
-        if not choices[v] then
-            return false
-        end
-    end
-    return true
-end
-
-
-local function row_make_client_to_lua_validator(field)
-    return function (rows, model)
-        local err
-        for r, row in ipairs(rows) do
-            for j, subfield in ipairs(field.subfields) do
-                local c = subfield.name
-                row[c], err = subfield.client_to_lua(row[c], model)
-                if err then
-                    return nil, err, r, c
-                end
-            end
-        end
-        return rows
-    end
-end
-local function row_make_lua_to_db_validator(field)
-    return function (rows, model)
-        local err
-        for r, row in ipairs(rows) do
-            for j, subfield in ipairs(field.subfields) do
-                local c = subfield.name
-                row[c], err = subfield.lua_to_db(row[c], model)
-                if err then
-                    return nil, err, r, c
-                end
-            end
-        end
-        return rows
-    end
-end
-local function row_make_db_to_lua_validator(field)
-    return function (rows, model)
-        local err
-        for r, row in ipairs(rows) do
-            for j, subfield in ipairs(field.subfields) do
-                local c = subfield.name
-                row[c], err = subfield.db_to_lua(row[c], model)
-                if err then
-                    return nil, err, r, c
-                end
-            end
-        end
-        return rows
-    end
-end
-local VALID_ROW_TYPES = {
-    string = true, 
-    integer = true, 
-    float = true, 
-    datetime = true, 
-    date = true, 
-    time = true, 
-    foreignkey = true, 
+local INHERIT_METHODS = {
+  new = true,
+  __add = true,
+  __sub = true,
+  __mul = true,
+  __div = true,
+  __mod = true,
+  __pow = true,
+  __unm = true,
+  __concat = true,
+  __len = true,
+  __eq = true,
+  __lt = true,
+  __le = true,
+  __index = true,
+  __newindex = true,
+  __call = true,
+  __tostring = true
 }
-local row = setmetatable({type='row', db_type="varchar"}, array)
-row.__index = row
-row.__call = __call
-function row._check_attributes(self)
-    assert(type(self.subfields) == 'table', 'you must define subfields')
-    for i, subfield in ipairs(self.subfields) do
-        assert(VALID_ROW_TYPES[subfield.type], 'invalid subfield type: '..subfield.type)
-    end
-    array._check_attributes(self)
-end
-function row._make_native_validators_for_client_to_lua(self, validators)
-    table.insert(validators, 1, row_make_client_to_lua_validator(self))
-    array._make_native_validators_for_client_to_lua(self, validators)
-end
-function row._make_native_validators_for_lua_to_db(self, validators) 
-    table.insert(validators, row_make_lua_to_db_validator(self))
-    array._make_native_validators_for_lua_to_db(self, validators)
-end
-function row._make_native_validators_for_db_to_lua(self, validators) 
-    table.insert(validators, 1, row_make_db_to_lua_validator(self))
-    array._make_native_validators_for_db_to_lua(self, validators)
+local function class_new(cls, self)
+  return setmetatable(self or {}, cls)
 end
 
--- default to postgresql
-local datetime = setmetatable({type='datetime', db_type='timestamp(0) with time zone'}, basefield)
-datetime.__index = datetime
-datetime.__call = __call
-function datetime.new(cls, attrs)
-    if attrs.auto_now_add or attrs.auto_now then
-        attrs.default = ngx_localtime
-        attrs.required = false
-    end
-    if attrs.database == 'mysql' then
-        attrs.db_type = 'datetime'
-    end
-    return basefield.new(cls, attrs)
-end
-function datetime._make_native_validators_for_client_to_lua(self, validators)
-    if self.auto_now_add or self.auto_now  then
-        -- by design, any client_to_lua validator is unnecessary, so do nothing.
-    else
-        basefield._make_native_validators_for_client_to_lua(self, validators)
-    end
+local function class__call(cls, attrs)
+  local self = cls:new()
+  self:init(attrs)
+  return self
 end
 
+local function class__init(self, attrs)
 
-local date = setmetatable({type='date'}, basefield)
-date.__index = date
-date.__call = __call
-
-
-local time = setmetatable({type='time', db_type='time with time zone'}, basefield)
-time.__index = time
-time.__call = __call
-function time.new(cls, attrs)
-    if attrs.database == 'mysql' then
-        attrs.db_type = 'time'
-    end
-    return basefield.new(cls, attrs)
 end
 
-
-local function foreignkey_db_to_lua_validator(fk_model)
-    local function __index(t, key)
-        -- perform sql only when key is in fields:
-        if fk_model.fields_dict[key] then
-            local res, err = fk_model.get('id='..t.id)
-            if not res then
-                return nil
-            end
-            for k, v in pairs(res) do
-                rawset(t, k, v)
-            end
-            setmetatable(t, fk_model) -- become an instance of fk_model
-            return t[key]
-        else
-            return fk_model[key] -- otherwise try to return attributes of fk_model
+---make a class with methods: __index, __call, class, new
+---@param cls table
+---@param parent? table
+---@param copy_parent? boolean
+---@return table
+local function class(cls, parent, copy_parent)
+  if parent then
+    if copy_parent then
+      for key, value in pairs(parent) do
+        if cls[key] == nil then
+          cls[key] = value
         end
+      end
     end
-    -- local function __newindex(t, key, value)
-    --     -- perform sql only when key is in fields:
-    --     if fk_model.fields_dict[key] then
-    --         local res, err = fk_model.get('id='..t.id)
-    --         if not res then
-    --             return nil
-    --         end
-    --         -- update there attributes
-    --         for k, v in pairs(res) do
-    --             rawset(t, k, v)
-    --         end
-    --         setmetatable(t, fk_model) -- become an instance of fk_model
-    --         t[key] = value
-    --     else
-    --         rawset(t, key, value)
-    --     end
-    -- end
-    local function validator(v)
-        return setmetatable({id = v}, {__index = __index})
+    setmetatable(cls, parent)
+    for method, _ in pairs(INHERIT_METHODS) do
+      if cls[method] == nil and parent[method] ~= nil then
+        cls[method] = parent[method]
+      end
     end
-    return validator
-end
-local function foreignkey_lua_to_db_validator(v)
-    if type(v) == 'table' then
-        v = v.id
-    end
-    v = tonumber(v)
-    if v then
-        return v
-    else
-        return nil, 'foreignkey must be a number or table whose key `id` is a number'
-    end
-end
-local foreignkey = setmetatable({type='foreignkey', db_type='integer'}, basefield)
-foreignkey.__index = foreignkey
-foreignkey.__call = __call
-function foreignkey._check_attributes(self)
-    basefield._check_attributes(self)
-    assert(type(self.reference)=='table', 'a foreign key must define reference.')
-end
-function foreignkey._make_native_validators_for_client_to_lua(self, validators)
-    table.insert(validators, 1, Validator.integer)
-    basefield._make_native_validators_for_client_to_lua(self, validators)
-end
-function foreignkey._make_native_validators_for_lua_to_db(self, validators)
-    table.insert(validators, foreignkey_lua_to_db_validator)
-    basefield._make_native_validators_for_lua_to_db(self, validators)
-end
-function foreignkey._make_native_validators_for_db_to_lua(self, validators)
-    table.insert(validators, 1, foreignkey_db_to_lua_validator(self.reference))
-    basefield._make_native_validators_for_db_to_lua(self, validators)
+  end
+  function cls.class(cls, subcls, copy_parent)
+    return class(subcls, cls, copy_parent)
+  end
+
+  cls.new = cls.new or class_new
+  cls.init = cls.init or class__init
+  cls.__call = cls.__call or class__call
+  cls.__index = cls
+  return cls
 end
 
+local function utf8len(s)
+  local _, cnt = s:gsub("[^\128-\193]", "")
+  return cnt
+end
 
-return {
-    string = string, 
-    integer = integer, 
-    float = float, 
-    datetime = datetime, 
+local size_table = {
+  k = 1024,
+  m = 1024 * 1024,
+  g = 1024 * 1024 * 1024,
+  kb = 1024,
+  mb = 1024 * 1024,
+  gb = 1024 * 1024 * 1024
+}
+local function byte_size_parser(t)
+  if type(t) == "string" then
+    local unit = t:gsub("^(%d+)([^%d]+)$", "%2"):lower()
+    local ts = t:gsub("^(%d+)([^%d]+)$", "%1"):lower()
+    local bytes = size_table[unit]
+    assert(bytes, "invalid size unit: " .. unit)
+    local num = tonumber(ts)
+    assert(num, "can't convert `" .. ts .. "` to a number")
+    return num * bytes
+  elseif type(t) == "number" then
+    return t
+  else
+    error("invalid type:" .. type(t))
+  end
+end
+
+local basefield
+local string
+local sfzh
+local email
+local password
+local text
+local integer
+local float
+local datetime
+local date
+local year_month
+local year
+local month
+local time
+local json
+local array
+local table
+local foreignkey
+local boolean
+local alioss
+local alioss_image
+local alioss_list
+local alioss_image_list
+
+local function get_fields()
+  return {
+    basefield = basefield,
+    string = string,
+    sfzh = sfzh,
+    email = email,
+    password = password,
+    text = text,
+    integer = integer,
+    float = float,
+    datetime = datetime,
     date = date,
+    year_month = year_month,
+    year = year,
+    month = month,
     time = time,
     json = json,
     array = array,
-    row = row,
+    table = table,
     foreignkey = foreignkey,
-    VALIDATE_STAGES = VALIDATE_STAGES,
+    boolean = boolean,
+    alioss = alioss,
+    alioss_image = alioss_image,
+    alioss_list = alioss_list,
+    alioss_image_list = alioss_image_list,
+  }
+end
+
+local TABLE_MAX_ROWS = 1
+local CHOICES_ERROR_DISPLAY_COUNT = 30
+local DEFAULT_ERROR_MESSAGES = { required = "此项必填", choices = "无效选项" }
+local DEFAULT_BOOLEAN_CHOICES = { { label = '是', value = true }, { label = '否', value = false } }
+local VALID_FOREIGN_KEY_TYPES = {
+  foreignkey = tostring,
+  string = tostring,
+  sfzh = tostring,
+  integer = Validators.integer,
+  float = tonumber,
+  datetime = Validators.datetime,
+  date = Validators.date,
+  time = Validators.time
 }
+-- local PRIMITIVES = {
+--   string = true,
+--   number = true,
+--   boolean = true,
+--   table = true,
+-- }
+local NULL = ngx.null
+
+local FK_TYPE_NOT_DEFIEND = {}
+
+local function clean_choice(c)
+  local v
+  if c.value ~= nil then
+    v = c.value
+  else
+    v = c[1]
+  end
+  assert(v ~= nil, "you must provide a value for a choice")
+  local l
+  if c.label ~= nil then
+    l = c.label
+  elseif c[2] ~= nil then
+    l = c[2]
+  else
+    l = v
+  end
+  return v, l, (c.hint or c[3])
+end
+local function string_choices_to_array(s)
+  local choices = Array {}
+  local spliter = s:find('\n') and '\n' or ','
+  for _, line in ipairs(split(s, spliter)) do
+    line = assert(Validators.trim(line))
+    if line ~= "" then
+      choices[#choices + 1] = line
+    end
+  end
+  return choices
+end
+local function get_choices(raw_choices)
+  if type(raw_choices) == 'string' then
+    raw_choices = string_choices_to_array(raw_choices)
+  end
+  if type(raw_choices) ~= 'table' then
+    error(string_format("choices type must be table ,not %s", type(raw_choices)))
+  end
+  local choices = Array {}
+  for i, c in ipairs(raw_choices) do
+    if type(c) == "string" then
+      c = { value = c, label = c }
+    elseif type(c) == "number" or type(c) == "boolean" then
+      c = { value = c, label = tostring(c) }
+    elseif type(c) == "table" then
+      local value, label, hint = clean_choice(c)
+      c = { value = value, label = label, hint = hint }
+    else
+      error("invalid choice type:" .. type(c))
+    end
+    choices[#choices + 1] = c
+  end
+  return choices
+end
+
+local function serialize_choice(choice)
+  return tostring(choice.value)
+end
+
+local function get_choices_error_message(choices)
+  local valid_choices = table_concat(map(choices, serialize_choice), "，")
+  return string_format("限下列选项：%s", valid_choices)
+end
+
+local function get_choices_validator(choices, message)
+  if #choices <= CHOICES_ERROR_DISPLAY_COUNT then
+    message = string_format("%s，%s", message, get_choices_error_message(choices))
+  end
+  local is_choice = {}
+  for _, c in ipairs(choices) do
+    is_choice[c.value] = true
+  end
+  local function choices_validator(value)
+    if not is_choice[value] then
+      return nil, message
+    else
+      return value
+    end
+  end
+
+  return choices_validator
+end
+
+local shortcuts_names = { 'name', 'label', 'type', 'required' }
+local function normalize_field_shortcuts(field)
+  field = clone(field)
+  for i, prop in ipairs(shortcuts_names) do
+    if field[prop] == nil and field[i] ~= nil then
+      field[prop] = field[i]
+      field[i] = nil
+    end
+  end
+  return field
+end
+
+local base_option_names = {
+  "primary_key",
+  "null",
+  "unique",
+  "index",
+  "db_type",
+  "required",
+  "disabled",
+  "default",
+  "label",
+  "hint",
+  "error_messages",
+  "choices",
+  "strict",
+  "choices_url",
+  "choices_url_admin",
+  "choices_url_method",
+  "autocomplete",
+  "max_display_count", -- 前端autocomplete.choices最大展示数
+  "max_choices_count", -- 前端autocomplete.choices最大数
+  "preload",
+  "lazy",
+  "tag",
+  "group", -- fui联动choices
+  "attrs",
+}
+---@type Field
+basefield = class {
+  __is_field_class__ = true,
+  option_names = {},
+  normalize_field_shortcuts = normalize_field_shortcuts,
+  __call = function(cls, options)
+    return cls:create_field(options)
+  end,
+  create_field = function(cls, options)
+    local self = cls:new {}
+    self:init(options)
+    self.validators = self:get_validators {}
+    return self
+  end,
+  new = function(cls, self)
+    return setmetatable(self or {}, cls)
+  end,
+  init = function(self, options)
+    self.name = assert(options.name, "you must define a name for a field")
+    self.type = options.type
+    for _, name in ipairs(self:get_option_names()) do
+      if options[name] ~= nil then
+        self[name] = options[name]
+      end
+    end
+    if options.attrs then
+      self.attrs = clone(options.attrs)
+    end
+    if self.required == nil then
+      self.required = false
+    end
+    if self.db_type == nil then
+      self.db_type = self.type
+    end
+    if self.label == nil then
+      self.label = self.name
+    end
+    if self.null == nil then
+      if self.required or self.db_type == 'varchar' or self.db_type == 'text' then
+        self.null = false
+      else
+        self.null = true
+      end
+    end
+    if type(self.choices) == 'table' or type(self.choices) == 'string' then
+      self.choices = get_choices(self.choices)
+    end
+    if self.autocomplete then
+      if self.max_choices_count == nil then
+        self.max_choices_count = getenv('MAX_CHOICES_COUNT') or 100
+      end
+      if self.max_display_count == nil then
+        self.max_display_count = getenv('MAX_DISPLAY_COUNT') or 50
+      end
+    end
+    return self
+  end,
+  get_option_names = function(self)
+    return list(base_option_names, self.option_names)
+  end,
+  get_error_message = function(self, key)
+    if self.error_messages and self.error_messages[key] then
+      return self.error_messages[key]
+    end
+    return DEFAULT_ERROR_MESSAGES[key]
+  end,
+  get_validators = function(self, validators)
+    if self.required then
+      table_insert(validators, 1, Validators.required(self:get_error_message('required')))
+    else
+      table_insert(validators, 1, Validators.not_required)
+    end
+    -- if type(self.choices_url) == 'string' and self.strict then
+    --   local function dynamic_choices_validator(val)
+    --     local message = self:get_error_message('choices')
+    --     local choices = get_choices(http[self.choices_url_method or 'get'](self.choices_url).body)
+    --     for _, c in ipairs(choices) do
+    --       if val == c.value then
+    --         return val
+    --       end
+    --     end
+    --     if #choices <= CHOICES_ERROR_DISPLAY_COUNT then
+    --       message = string_format("%s，%s", message, get_choices_error_message(choices))
+    --     end
+    --     return nil, message
+    --   end
+    --   table_insert(validators, dynamic_choices_validator)
+    -- end
+    if type(self.choices) == 'table' and self.choices[1] and (self.strict == nil or self.strict) then
+      self.static_choice_validator = get_choices_validator(self.choices, self:get_error_message('choices'))
+      table_insert(validators, self.static_choice_validator)
+    end
+    return validators
+  end,
+  get_options = function(self)
+    local ret = {
+      name = self.name,
+      type = self.type,
+    }
+    for _, name in ipairs(self:get_option_names()) do
+      if self[name] ~= nil then
+        ret[name] = self[name]
+      end
+    end
+    if ret.attrs then
+      ret.attrs = clone(ret.attrs)
+    end
+    return ret
+  end,
+  json = function(self)
+    local res = self:get_options()
+    if type(res.default) == 'function' then
+      res.default = nil
+    end
+    if type(res.choices) == 'function' then
+      res.choices = nil
+    end
+    if not res.tag then
+      if type(res.choices) == 'table' and #res.choices > 0 and not res.autocomplete then
+        res.tag = "select"
+      else
+        res.tag = "input"
+      end
+    end
+    if res.tag == "input" and res.lazy == nil then
+      res.lazy = true
+    end
+    if res.preload == nil and (res.choices_url or res.choices_url_admin) then
+      res.preload = false
+    end
+    return res
+  end,
+  widget_attrs = function(self, extra_attrs)
+    return dict({ required = self.required, readonly = self.disabled }, extra_attrs)
+  end,
+  validate = function(self, value, ctx)
+    if type(value) == 'function' then
+      return value
+    end
+    local err, index
+    for _, validator in ipairs(self.validators) do
+      value, err, index = validator(value, ctx)
+      if value ~= nil then
+        if err == nil then
+        elseif value == err then
+          -- 代表保持原值,跳过此阶段的所有验证
+          return value
+        else
+          return nil, err, index
+        end
+      elseif err ~= nil then
+        return nil, err, index
+      else
+        -- not-required validator, skip the rest validations
+        return nil
+      end
+    end
+    return value
+  end,
+  get_default = function(self, ctx)
+    if type(self.default) ~= "function" then
+      return self.default
+    else
+      return self.default(ctx)
+    end
+  end,
+  make_error = function(self, message, index)
+    return {
+      type = 'field_error',
+      message = message,
+      index = index,
+      name = self.name,
+      label = self.label,
+    }
+  end,
+  to_form_value = function(self, value)
+    return value
+  end,
+  to_post_value = function(self, value)
+    return value
+  end
+}
+
+local function get_max_choice_length(choices)
+  local n = 0
+  for _, c in ipairs(choices) do
+    local value = c.value
+    local n1 = utf8len(value)
+    if n1 > n then
+      n = n1
+    end
+  end
+  return n
+end
+
+string = basefield:class {
+  option_names = {
+    "compact",
+    "trim",
+    "pattern",
+    "length",
+    "minlength",
+    "maxlength",
+    "input_type",
+  },
+  init = function(self, options)
+    if not options.choices and not options.length and not options.maxlength then
+      error(string_format("field '%s' must define maxlength or choices or length", options.name))
+    end
+    basefield.init(self, dict({
+      type = "string",
+      db_type = "varchar",
+      compact = true,
+      trim = true,
+    }, options))
+    --TODO:考虑default为函数时,数据库层面应该为空字符串.从migrate.lua的serialize_defaut特定可以考虑default函数传入nil时认定为migrate的情形, 自行返回空字符串
+    if self.default == nil and not self.primary_key and not self.unique then
+      self.default = ""
+    end
+    if self.choices and #self.choices > 0 then
+      local n = get_max_choice_length(self.choices)
+      assert(n > 0, "invalid string choices(empty choices or zero length value):" .. self.name)
+      local m = self.length or self.maxlength
+      if not m or n > m then
+        self.maxlength = n
+      end
+    end
+  end,
+  get_validators = function(self, validators)
+    for _, e in ipairs { "pattern", "length", "minlength", "maxlength" } do
+      if self[e] then
+        table_insert(validators, 1, Validators[e](self[e], self:get_error_message(e)))
+      end
+    end
+    if self.compact then
+      table_insert(validators, 1, Validators.delete_spaces)
+    elseif self.trim then
+      table_insert(validators, 1, Validators.trim)
+    end
+    table_insert(validators, 1, Validators.string)
+    return basefield.get_validators(self, validators)
+  end,
+  widget_attrs = function(self, extra_attrs)
+    local attrs = {
+      -- maxlength = self.maxlength,
+      minlength = self.minlength
+      -- pattern = self.pattern,
+    }
+    return dict(basefield.widget_attrs(self), dict(attrs, extra_attrs))
+  end,
+  to_form_value = function(self, value)
+    if not value then
+      return ""
+    elseif type(value) == 'string' then
+      return value
+    else
+      return tostring(value)
+    end
+  end,
+  to_post_value = function(self, value)
+    if self.compact then
+      if not value then
+        return ""
+      else
+        return value:gsub('%s', '')
+      end
+    else
+      return value or ""
+    end
+  end
+}
+
+text = basefield:class {
+  option_names = { "trim", "pattern" },
+  init = function(self, options)
+    basefield.init(self, dict({
+      type = "text",
+      db_type = "text",
+    }, options))
+    if self.default == nil then
+      self.default = ""
+    end
+    if self.attrs and self.attrs.auto_size == nil then
+      self.attrs.auto_size = false
+    end
+  end,
+}
+
+sfzh = string:class {
+  option_names = { unpack(string.option_names) },
+  init = function(self, options)
+    string.init(self, dict({
+      type = "sfzh",
+      db_type = "varchar",
+      length = 18
+    }, options))
+  end,
+  get_validators = function(self, validators)
+    table_insert(validators, 1, Validators.sfzh)
+    return string.get_validators(self, validators)
+  end,
+}
+
+email = string:class {
+  option_names = { unpack(string.option_names) },
+  init = function(self, options)
+    string.init(self, dict({
+      type = "email",
+      db_type = "varchar",
+      maxlength = 255
+    }, options))
+  end,
+  get_validators = function(self, validators)
+    table_insert(validators, 1, Validators.email)
+    return string.get_validators(self, validators)
+  end,
+}
+
+password = string:class {
+  option_names = { unpack(string.option_names) },
+  init = function(self, options)
+    string.init(self, dict({
+      type = "password",
+      db_type = "varchar",
+      maxlength = 255
+    }, options))
+  end
+}
+
+year_month = string:class {
+  option_names = { unpack(string.option_names) },
+  init = function(self, options)
+    string.init(self, dict({
+      type = "year_month",
+      db_type = "varchar",
+      maxlength = 7
+    }, options))
+  end,
+  get_validators = function(self, validators)
+    table_insert(validators, 1, Validators.year_month)
+    return basefield.get_validators(self, validators)
+  end,
+}
+
+local function add_min_or_max_validators(self, validators)
+  for _, name in ipairs({ "min", "max" }) do
+    if self[name] then
+      table_insert(validators, 1, Validators[name](self[name], self:get_error_message(name)))
+    end
+  end
+end
+
+integer = basefield:class {
+  option_names = { "min", "max", "step", "serial" },
+  init = function(self, options)
+    basefield.init(self, dict({
+      type = "integer",
+      db_type = "integer",
+    }, options))
+  end,
+  get_validators = function(self, validators)
+    add_min_or_max_validators(self, validators)
+    table_insert(validators, 1, Validators.integer)
+    return basefield.get_validators(self, validators)
+  end,
+  json = function(self)
+    local json = basefield.json(self)
+    if json.primary_key and json.disabled == nil then
+      json.disabled = true
+    end
+    return json
+  end,
+  prepare_for_db = function(self, value)
+    if value == "" or value == nil then
+      return NULL
+    else
+      return value
+    end
+  end
+}
+
+year = integer:class {
+  option_names = { unpack(integer.option_names) },
+  init = function(self, options)
+    integer.init(self, dict({
+      type = "year",
+      db_type = "integer",
+      min = 1000,
+      max = 9999
+    }, options))
+  end,
+}
+
+month = integer:class {
+  option_names = { unpack(integer.option_names) },
+  init = function(self, options)
+    integer.init(self, dict({
+      type = "month",
+      db_type = "integer",
+      min = 1,
+      max = 12
+    }, options))
+  end,
+}
+
+float = basefield:class {
+  option_names = { "min", "max", "step", "precision" },
+  init = function(self, options)
+    basefield.init(self, dict({
+      type = "float",
+      db_type = "float",
+    }, options))
+  end,
+  get_validators = function(self, validators)
+    add_min_or_max_validators(self, validators)
+    table_insert(validators, 1, Validators.number)
+    return basefield.get_validators(self, validators)
+  end,
+  prepare_for_db = function(self, value)
+    if value == "" or value == nil then
+      return NULL
+    else
+      return value
+    end
+  end,
+}
+
+boolean = basefield:class {
+  option_names = { 'cn' },
+  init = function(self, options)
+    basefield.init(self, dict({
+      type = "boolean",
+      db_type = "boolean",
+    }, options))
+    if self.choices == nil then
+      self.choices = clone(DEFAULT_BOOLEAN_CHOICES)
+    end
+  end,
+  get_validators = function(self, validators)
+    if self.cn then
+      table_insert(validators, 1, Validators.boolean_cn)
+    else
+      table_insert(validators, 1, Validators.boolean)
+    end
+    return basefield.get_validators(self, validators)
+  end,
+  prepare_for_db = function(self, value)
+    if value == "" or value == nil then
+      return NULL
+    else
+      return value
+    end
+  end,
+}
+
+datetime = basefield:class {
+  option_names = {
+    'auto_now_add',
+    'auto_now',
+    'precision',
+    'timezone',
+  },
+  init = function(self, options)
+    basefield.init(self, dict({
+      type = "datetime",
+      db_type = "timestamp",
+      precision = 0,
+      timezone = true,
+    }, options))
+    if self.auto_now_add then
+      self.default = ngx_localtime
+    end
+  end,
+  get_validators = function(self, validators)
+    table_insert(validators, 1, Validators.datetime)
+    return basefield.get_validators(self, validators)
+  end,
+  json = function(self)
+    local ret = basefield.json(self)
+    if ret.disabled == nil and (ret.auto_now or ret.auto_now_add) then
+      ret.disabled = true
+    end
+    return ret
+  end,
+  prepare_for_db = function(self, value)
+    if self.auto_now then
+      return ngx_localtime()
+    elseif value == "" or value == nil then
+      return NULL
+    else
+      return value
+    end
+  end,
+}
+
+date = basefield:class {
+  option_names = {},
+  init = function(self, options)
+    basefield.init(self, dict({
+      type = "date",
+      db_type = "date",
+    }, options))
+  end,
+  get_validators = function(self, validators)
+    table_insert(validators, 1, Validators.date)
+    return basefield.get_validators(self, validators)
+  end,
+  prepare_for_db = function(self, value)
+    if value == "" or value == nil then
+      return NULL
+    else
+      return value
+    end
+  end,
+}
+
+time = basefield:class {
+  option_names = { 'precision', 'timezone' },
+  init = function(self, options)
+    basefield.init(self, dict({
+      type = "time",
+      db_type = "time",
+      precision = 0,
+      timezone = true,
+    }, options))
+  end,
+  get_validators = function(self, validators)
+    table_insert(validators, 1, Validators.time)
+    return basefield.get_validators(self, validators)
+  end,
+  prepare_for_db = function(self, value)
+    if value == "" or value == nil then
+      return NULL
+    else
+      return value
+    end
+  end,
+}
+
+foreignkey = basefield:class {
+  option_names = {
+    "json_non_fk",
+    "reference",
+    "reference_column",
+    "reference_label_column",
+    "reference_url",
+    "reference_url_admin",
+    "on_delete",
+    "on_update",
+    "table_name",
+    "admin_url_name",
+    "models_url_name",
+    "keyword_query_name",
+    "limit_query_name",
+  },
+  init = function(self, options)
+    basefield.init(self, dict({
+      type = "foreignkey",
+      db_type = FK_TYPE_NOT_DEFIEND,
+      FK_TYPE_NOT_DEFIEND = FK_TYPE_NOT_DEFIEND,
+      on_delete = 'CASCADE',
+      on_update = 'CASCADE',
+      admin_url_name = 'admin',
+      models_url_name = 'model',
+      keyword_query_name = 'keyword',
+      limit_query_name = 'limit',
+      convert = tostring,
+    }, options))
+    local fk_model = self.reference
+    if fk_model == "self" then
+      -- used with Xodel._make_model_class
+      return self
+    end
+    self:setup_with_fk_model(fk_model)
+  end,
+  setup_with_fk_model = function(self, fk_model)
+    --setup: reference_column, reference_label_column, db_type
+    assert(type(fk_model) == "table" and fk_model.__is_model_class__,
+      string_format("a foreignkey must define a reference model. not %s(type: %s)", fk_model, type(fk_model)))
+    local rc = self.reference_column or fk_model.primary_key or fk_model.DEFAULT_PRIMARY_KEY or "id"
+    local fk = fk_model.fields[rc]
+    assert(fk, string_format("invalid foreignkey name %s for foreign model %s",
+      rc,
+      fk_model.table_name or "[TABLE NAME NOT DEFINED YET]"))
+    self.reference_column = rc
+    local rlc = self.reference_label_column or fk_model.referenced_label_column or rc
+    local _fk, _fk_of_fk = rlc:match("(%w+)__(%w+)")
+    local check_key = _fk or rlc
+    assert(fk_model.fields[check_key], string_format("invalid foreignkey label name %s for foreign model %s",
+      check_key,
+      fk_model.table_name or "[TABLE NAME NOT DEFINED YET]"))
+    self.reference_label_column = rlc
+    self.convert = assert(VALID_FOREIGN_KEY_TYPES[fk.type],
+      string_format("invalid foreignkey (name:%s, type:%s)", fk.name, fk.type))
+    assert(fk.primary_key or fk.unique, "foreignkey must be a primary key or unique key")
+    if self.db_type == FK_TYPE_NOT_DEFIEND then
+      self.db_type = fk.db_type or fk.type
+    end
+  end,
+  get_validators = function(self, validators)
+    local fk_name = self.reference_column
+    local function foreignkey_validator(v)
+      local err
+      if type(v) == "table" then
+        v = v[fk_name]
+      end
+      v, err = self.convert(v)
+      if err then
+        local label_type = self.reference.fields[self.reference_label_column].type
+        local value_type = self.reference.fields[self.reference_column].type
+        if label_type ~= value_type then
+          return nil, "输入错误" --前端autocomplete可能传来label值
+        end
+        return nil, tostring(err)
+      end
+      return v
+    end
+
+    table_insert(validators, 1, foreignkey_validator)
+    return basefield.get_validators(self, validators)
+  end,
+  load = function(self, value)
+    local fk_name = self.reference_column
+    local fk_model = self.reference
+    local function __index(t, key)
+      if fk_model[key] then
+        -- perform sql only when key is in fields:
+        return fk_model[key]
+      elseif fk_model.fields[key] then
+        local pk = rawget(t, fk_name)
+        if not pk then
+          return nil
+        end
+        local res = fk_model:get { [fk_name] = pk }
+        if not res then
+          return nil
+        end
+        for k, v in pairs(res) do
+          rawset(t, k, v)
+        end
+        -- become an instance of fk_model
+        fk_model:create_record(t)
+        return t[key]
+      else
+        return nil
+      end
+    end
+
+    return setmetatable({ [fk_name] = value }, { __index = __index })
+  end,
+  json = function(self)
+    if self.json_non_fk then
+      local ret = {
+        name = self.name,
+        label = self.label,
+      }
+      ret.type = self.reference.fields[self.reference_column].type
+      if ret.choices_url == nil then
+        ret.choices_url = string_format([[/%s/choices?value=%s&label=%s]],
+          self.reference.table_name,
+          self.reference_column,
+          self.reference_label_column)
+      end
+      return ret
+    end
+    local ret = basefield.json(self)
+    ret.reference = self.reference.table_name
+    if self.autocomplete == nil then
+      ret.autocomplete = true
+    end
+    ret.choices_url_admin = string_format([[/%s/%s/%s/fk/%s/%s]],
+      ret.admin_url_name,
+      ret.models_url_name,
+      ret.table_name,
+      ret.name,
+      ret.reference_label_column)
+    ret.reference_url_admin = string_format([[/%s/%s/%s]],
+      ret.admin_url_name,
+      ret.models_url_name,
+      ret.reference)
+    if ret.choices_url == nil then
+      ret.choices_url = string_format([[/%s/choices?value=%s&label=%s]],
+        ret.reference,
+        ret.reference_column,
+        ret.reference_label_column)
+    end
+    if ret.reference_url == nil then
+      ret.reference_url = string_format([[/%s/json]], ret.reference)
+    end
+    return ret
+  end,
+  prepare_for_db = function(self, value)
+    if value == "" or value == nil then
+      return NULL
+    else
+      return value
+    end
+  end,
+  to_form_value = function(self, value)
+    if type(value) == "table" then
+      return value[self.reference_column]
+    else
+      return value
+    end
+  end
+}
+
+json = basefield:class {
+  option_names = {},
+  init = function(self, options)
+    basefield.init(self, dict({
+      type = "json",
+      db_type = "jsonb",
+    }, options))
+  end,
+  json = function(self)
+    local json = basefield.json(self)
+    json.tag = "textarea"
+    return json
+  end,
+  prepare_for_db = function(self, value)
+    if value == "" or value == nil then
+      return NULL
+    else
+      return Validators.encode(value)
+    end
+  end,
+}
+
+local function skip_validate_when_string(v)
+  if type(v) == "string" then
+    return v, v
+  else
+    return v
+  end
+end
+
+local function check_array_type(v)
+  if type(v) ~= "table" then
+    return nil, "value of array field must be a array"
+  else
+    return v
+  end
+end
+
+local function non_empty_array_required(message)
+  message = message or "此项必填"
+  local function array_required_validator(v)
+    if #v == 0 then
+      return nil, message
+    else
+      return v
+    end
+  end
+
+  return array_required_validator
+end
+
+
+local basearray = json:class {
+  init = function(self, options)
+    json.init(self, options)
+    if type(self.default) == 'string' then
+      self.default = string_choices_to_array(self.default)
+    end
+  end,
+  get_validators = function(self, validators)
+    if self.required then
+      table_insert(validators, 1, non_empty_array_required(self:get_error_message('required')))
+    end
+    table_insert(validators, 1, check_array_type)
+    table_insert(validators, 1, skip_validate_when_string)
+    table_insert(validators, Validators.encode_as_array)
+    return json.get_validators(self, validators)
+  end,
+  get_empty_value_to_update = function()
+    return Array()
+  end,
+  to_form_value = function(value)
+    if isarray(value) then
+      return clone(value)
+    else
+      return {}
+    end
+  end
+}
+
+array = basearray:class {
+  option_names = { 'field', 'min' },
+  init = function(self, options)
+    basearray.init(self, dict({
+      type = "array",
+      min = 1,
+    }, options))
+    assert(type(self.field) == 'table', string_format('array field "%s" must define field', self.name))
+    self.field = normalize_field_shortcuts(self.field)
+    if not self.field.name then
+      self.field.name = self.name
+    end
+    local fields = get_fields()
+    local array_field_cls = fields[self.field.type or 'string']
+    if not array_field_cls then
+      error("invalid array field type: " .. self.field.type)
+    end
+    self.field = array_field_cls:create_field(self.field)
+  end,
+  get_options = function(self)
+    local options = basefield.get_options(self)
+    local array_field_options = self.field:get_options()
+    options.field = array_field_options
+    return options
+  end,
+  get_validators = function(self, validators)
+    local function array_validator(value)
+      local res = {}
+      local field = self.field
+      for i, e in ipairs(value) do
+        local val, err = field:validate(e)
+        if err ~= nil then
+          return nil, err, i
+        end
+        if field.default and (val == nil or val == "") then
+          if type(field.default) ~= "function" then
+            val = field.default
+          else
+            val, err = field.default()
+            if val == nil then
+              return nil, err, i
+            end
+          end
+        end
+        res[i] = val
+      end
+      return res
+    end
+    table_insert(validators, 1, array_validator)
+    return basearray.get_validators(self, validators)
+  end,
+}
+
+local function make_empty_array()
+  return Array()
+end
+
+table = basearray:class {
+  option_names = { 'model', 'max_rows', 'uploadable', 'columns' },
+  init = function(self, options)
+    basearray.init(self, dict({
+      type = "table",
+      max_rows = TABLE_MAX_ROWS,
+    }, options))
+    if type(self.model) ~= 'table' then
+      error("please define model for a table field: " .. self.name)
+    end
+    if not self.model.__is_model_class__ then
+      self.model = require("xodel.model"):create_model {
+        extends = self.model.extends,
+        mixins = self.model.mixins,
+        abstract = self.model.abstract,
+        admin = self.model.admin,
+        table_name = self.model.table_name,
+        label = self.model.label,
+        fields = self.model.fields,
+        field_names = self.model.field_names,
+        auto_primary_key = self.model.auto_primary_key,
+        primary_key = self.model.primary_key,
+        unique_together = self.model.unique_together
+      }
+    end
+    if not self.default or self.default == "" then
+      self.default = make_empty_array
+    end
+    if not self.model.table_name then
+      self.model:materialize_with_table_name { table_name = self.name, label = self.label }
+    end
+  end,
+  get_validators = function(self, validators)
+    local function validate_by_each_field(rows)
+      local err
+      for i, row in ipairs(rows) do
+        assert(type(row) == "table", "elements of table field must be table")
+        row, err = self.model:validate_create(row)
+        if row == nil then
+          return nil, err, i
+        end
+        rows[i] = row
+      end
+      return rows
+    end
+
+    table_insert(validators, 1, validate_by_each_field)
+    return basearray.get_validators(self, validators)
+  end,
+  json = function(self)
+    local ret = basearray.json(self)
+    local model = {
+      field_names = Array {},
+      fields = {},
+      table_name = self.model.table_name,
+      label = self.model.label
+    }
+    for _, name in ipairs(self.model.field_names) do
+      local field = self.model.fields[name]
+      model.field_names:push(name)
+      model.fields[name] = field:json()
+    end
+    ret.model = model
+    return ret
+  end,
+  load = function(self, rows)
+    if type(rows) ~= 'table' then
+      error('value of table field must be table, not ' .. type(rows))
+    end
+    for i = 1, #rows do
+      rows[i] = self.model:load(rows[i])
+    end
+    return Array(rows)
+  end,
+}
+
+local ALIOSS_BUCKET = getenv("ALIOSS_BUCKET") or ""
+local ALIOSS_REGION = getenv("ALIOSS_REGION") or ""
+local ALIOSS_SIZE = getenv("ALIOSS_SIZE") or "1M"
+local ALIOSS_LIFETIME = tonumber(getenv("ALIOSS_LIFETIME") or 30);
+alioss = string:class {
+  option_names = {
+    "size",
+    "size_arg",
+    "policy",
+    "payload",
+    "lifetime",
+    "key_secret",
+    "key_id",
+    "times",
+    "width",
+    "hash",
+    "image",
+    "prefix",
+    "upload_url",
+    "payload_url",
+    "input_type",
+    "limit",
+    "media_type",
+    unpack(string.option_names)
+  },
+  init = function(self, options)
+    string.init(self, dict({
+      type = "alioss",
+      db_type = "varchar",
+      maxlength = 255
+    }, options))
+    self:setup(options)
+  end,
+  setup = function(self, options)
+    local size = options.size or ALIOSS_SIZE
+    self.key_secret = options.key_secret
+    self.key_id = options.key_id
+    self.size_arg = size
+    self.size = byte_size_parser(size)
+    self.lifetime = options.lifetime or ALIOSS_LIFETIME
+    self.upload_url = string_format("//%s.%s.aliyuncs.com/",
+      options.bucket or ALIOSS_BUCKET,
+      options.region or ALIOSS_REGION)
+  end,
+  get_options = function(self)
+    local ret = string.get_options(self)
+    ret.size = ret.size_arg
+    ret.size_arg = nil
+    return ret
+  end,
+  get_payload = function(self, options)
+    return get_payload(dict(self, options))
+  end,
+  get_validators = function(self, validators)
+    table_insert(validators, 1, Validators.url)
+    return string.get_validators(self, validators)
+  end,
+  json = function(self)
+    local ret = string.json(self)
+    if ret.input_type == nil then
+      ret.input_type = "file"
+    end
+    ret.key_secret = nil
+    ret.key_id = nil
+    return ret
+  end,
+  load = function(self, value)
+    if value and value:sub(1, 1) == "/" then
+      local scheme = getenv('VITE_HTTPS') == 'on' and 'https' or 'http'
+      return scheme .. ':' .. value
+    else
+      return value
+    end
+  end
+}
+
+alioss_image = alioss:class {
+  init = function(self, options)
+    alioss.init(self, dict({
+      type = "alioss_image",
+      db_type = "varchar",
+      media_type = 'image',
+      image = true,
+    }, options))
+  end,
+}
+
+alioss_list = basearray:class {
+  option_names = { unpack(alioss.option_names) },
+  init = function(self, options)
+    basearray.init(self, dict({
+      type = "alioss_list",
+      db_type = 'jsonb',
+    }, options))
+    alioss.setup(self, options)
+  end,
+  get_payload = alioss.get_payload,
+  get_options = alioss.get_options,
+  json = function(self)
+    return dict(alioss.json(self), basearray.json(self))
+  end
+}
+
+alioss_image_list = alioss_list:class {
+  init = function(self, options)
+    alioss_list.init(self, dict({
+      type = "alioss_image_list",
+      -- media_type = 'image',
+      -- image = true,
+    }, options))
+  end,
+  -- json = function(self)
+  --   local ret = alioss_list.json(self)
+  --   ret.type = 'alioss_image_list'
+  --   return ret
+  -- end,
+}
+
+return get_fields()
