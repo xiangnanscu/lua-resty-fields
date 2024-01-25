@@ -1,5 +1,5 @@
 {
-  "name": "lua-resty-field",
+  "name": "lua-resty-fields",
   "version": "1.0.0",
   "description": "clean the value, used by lua-resty-model",
   "main": "index.js",
