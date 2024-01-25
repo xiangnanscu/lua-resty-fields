@@ -2,7 +2,7 @@ local clone = require "table.clone"
 local isarray = require("table.isarray")
 local Validators = require "resty.validator"
 local Array = require "resty.array"
-local dotenv = require("resty.dotenv")
+local getenv = require("resty.dotenv").getenv
 local get_payload = require "resty.alioss".get_payload
 local string_format = string.format
 local table_concat = table.concat
@@ -13,18 +13,6 @@ local type = type
 local rawset = rawset
 local ngx_localtime = ngx.localtime
 
-local JSON_ENV
-local function getenv(key)
-  if not JSON_ENV then
-    local json = dotenv { path = { '.env', '.env.local' } }
-    JSON_ENV = json
-  end
-  if key then
-    return JSON_ENV[key]
-  else
-    return JSON_ENV
-  end
-end
 
 local function dict(a, b)
   local t = clone(a)
