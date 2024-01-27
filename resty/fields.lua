@@ -305,7 +305,7 @@ local function get_choices_validator(choices, message)
   end
   local function choices_validator(value)
     if not is_choice[value] then
-      return nil, message
+      return nil, string_format('“%s”%s', value, message)
     else
       return value
     end
