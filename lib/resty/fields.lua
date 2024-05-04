@@ -773,11 +773,6 @@ function StringField:to_post_value(value)
   end
 end
 
---TODO:考虑orm层面的函数机制
-local UUID_DEFAULT = function()
-  return 'gen_random_uuid()'
-end
-
 ---@class UUIDField:BaseField
 ---@field type "uuid"
 ---@field db_type "uuid"
@@ -788,9 +783,6 @@ function UUIDField:init(options)
     type = "uuid",
     db_type = "uuid",
   }, options))
-  if self.default == nil then
-    self.default = UUID_DEFAULT
-  end
 end
 
 function UUIDField:json()
