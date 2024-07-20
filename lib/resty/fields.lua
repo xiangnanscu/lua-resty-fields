@@ -242,6 +242,21 @@ local function get_fields()
   }
 end
 
+local shortcuts_names = { 'name', 'label', 'type', 'required' }
+
+---@param field AnyField
+---@return AnyField
+local function normalize_field_shortcuts(field)
+  field = clone(field)
+  for i, prop in ipairs(shortcuts_names) do
+    if field[prop] == nil and field[i] ~= nil then
+      field[prop] = field[i]
+      field[i] = nil
+    end
+  end
+  return field
+end
+
 local TABLE_MAX_ROWS = 1
 local CHOICES_ERROR_DISPLAY_COUNT = 30
 local DEFAULT_ERROR_MESSAGES = { required = "此项必填", choices = "无效选项" }
@@ -256,34 +271,48 @@ local VALID_FOREIGN_KEY_TYPES = {
   date = Validator.date,
   time = Validator.time
 }
--- local PRIMITIVES = {
---   string = true,
---   number = true,
---   boolean = true,
---   table = true,
--- }
 local NULL = ngx.null
-
 local FK_TYPE_NOT_DEFIEND = {}
 
+local PRIMITIVE_TYPES = {
+  string = true,
+  number = true,
+  boolean = true,
+  -- table = true,
+}
+
 local function clean_choice(c)
-  local v
-  if c.value ~= nil then
-    v = c.value
+  if isarray(c) then
+    local value, label, hint = unpack(c)
+    return value, label or value, hint
   else
-    v = c[1]
+    local value = c.value
+    local label = c.label
+    local hint = c.hint
+    return value, label or value, hint
   end
-  assert(v ~= nil, "you must provide a value for a choice")
-  local l
-  if c.label ~= nil then
-    l = c.label
-  elseif c[2] ~= nil then
-    l = c[2]
-  else
-    l = v
-  end
-  return v, l, (c.hint or c[3])
 end
+
+local function normalize_choice(c)
+  if PRIMITIVE_TYPES[type(c)] then
+    return { value = c, label = tostring(c) }
+  elseif type(c) == "table" then
+    local res = {}
+    for k, v in pairs(c) do
+      if type(k) == 'string' then
+        res[k] = v
+      end
+    end
+    local value, label, hint = clean_choice(c)
+    res.value = value
+    res.label = label
+    res.hint = hint
+    return res
+  else
+    error("invalid choice type:" .. type(c))
+  end
+end
+
 local function string_choices_to_array(s)
   local choices = Array {}
   local spliter = s:find('\n') and '\n' or ','
@@ -295,6 +324,7 @@ local function string_choices_to_array(s)
   end
   return choices
 end
+
 local function get_choices(raw_choices)
   if type(raw_choices) == 'string' then
     raw_choices = string_choices_to_array(raw_choices)
@@ -302,21 +332,7 @@ local function get_choices(raw_choices)
   if type(raw_choices) ~= 'table' then
     error(string_format("choices type must be table ,not %s", type(raw_choices)))
   end
-  local choices = Array {}
-  for i, c in ipairs(raw_choices) do
-    if type(c) == "string" then
-      c = { value = c, label = c }
-    elseif type(c) == "number" or type(c) == "boolean" then
-      c = { value = c, label = tostring(c) }
-    elseif type(c) == "table" then
-      local value, label, hint = clean_choice(c)
-      c = { value = value, label = label, hint = hint }
-    else
-      error("invalid choice type:" .. type(c))
-    end
-    choices[#choices + 1] = c
-  end
-  return choices
+  return Array(raw_choices):map(normalize_choice)
 end
 
 local function serialize_choice(choice)
@@ -328,7 +344,7 @@ local function get_choices_error_message(choices)
   return string_format("限下列选项：%s", valid_choices)
 end
 
-local function get_choices_validator(choices, message)
+local function get_choices_validator(choices, message, is_array)
   if #choices <= CHOICES_ERROR_DISPLAY_COUNT then
     message = string_format("%s，%s", message, get_choices_error_message(choices))
   end
@@ -336,29 +352,31 @@ local function get_choices_validator(choices, message)
   for _, c in ipairs(choices) do
     is_choice[c.value] = true
   end
-  local function choices_validator(value)
-    if not is_choice[value] then
-      return nil, string_format('“%s”%s', value, message)
-    else
+  if is_array then
+    local function array_choices_validator(value)
+      if type(value) ~= 'table' then
+        return nil, "类型必须是数组，当前是：" .. type(value)
+      end
+      for i, e in ipairs(value) do
+        if not is_choice[e] then
+          return nil, string_format('“%s”%s', e, message)
+        end
+      end
       return value
     end
-  end
 
-  return choices_validator
-end
-
-local shortcuts_names = { 'name', 'label', 'type', 'required' }
----@param field AnyField
----@return AnyField
-local function normalize_field_shortcuts(field)
-  field = clone(field)
-  for i, prop in ipairs(shortcuts_names) do
-    if field[prop] == nil and field[i] ~= nil then
-      field[prop] = field[i]
-      field[i] = nil
+    return array_choices_validator
+  else
+    local function choices_validator(value)
+      if not is_choice[value] then
+        return nil, string_format('“%s”%s', value, message)
+      else
+        return value
+      end
     end
+
+    return choices_validator
   end
-  return field
 end
 
 local base_option_names = {
@@ -402,6 +420,9 @@ local base_option_names = {
 
 ---@class BaseField
 ---@overload fun(options: table): BaseField
+---@operator add(BaseField): string
+---@operator sub(BaseField): string
+---@operator eq(BaseField): string
 ---@field private __call function
 ---@field private __is_field_class__ true
 ---@field validators function[]
@@ -430,10 +451,37 @@ local base_option_names = {
 ---@field preload? boolean
 ---@field lazy? boolean
 ---@field tag? string
-BaseField = class {}
+---@field get_model fun(AnyField?):Xodel
+BaseField = class({}, {
+  __tostring = function(self)
+    return self.table_name .. '.' .. self.name
+  end,
+  __add = function(self, b)
+    if type(b) == 'number' then
+      return string_format("%s.%s + %s", self.table_name, self.name, b)
+    end
+    return string_format("%s.%s + %s.%s", self.table_name, self.name, b.table_name, b.name)
+  end,
+  __sub = function(self, b)
+    if type(b) == 'number' then
+      return string_format("%s.%s - %s", self.table_name, self.name, b)
+    end
+    return string_format("%s.%s - %s.%s", self.table_name, self.name, b.table_name, b.name)
+  end,
+  -- __sub = true,
+  -- __mul = true,
+  -- __div = true,
+  -- __mod = true,
+  -- __pow = true,
+  -- __unm = true,
+  -- __concat = true,
+  -- __lt = true,
+  -- __le = true,
+})
 BaseField.__is_field_class__ = true
 BaseField.option_names = {}
 BaseField.normalize_field_shortcuts = normalize_field_shortcuts
+
 ---@param subcls table
 ---@return self
 function BaseField:class(subcls)
@@ -541,8 +589,11 @@ function BaseField:get_validators(validators)
   --   end
   --   table_insert(validators, dynamic_choices_validator)
   -- end
-  if type(self.choices) == 'table' and self.choices[1] and (self.strict == nil or self.strict) then
-    self.static_choice_validator = get_choices_validator(self.choices, self:get_error_message('choices'))
+  if type(self.choices) == 'table' and #self.choices > 0 and (self.strict == nil or self.strict) then
+    self.static_choice_validator = get_choices_validator(
+      self.choices,
+      self:get_error_message('choices'),
+      self.type == 'array')
     table_insert(validators, self.static_choice_validator)
   end
   return validators
@@ -577,7 +628,7 @@ function BaseField:json()
   if not res.tag then
     if type(res.choices) == 'table' and #res.choices > 0 and not res.autocomplete then
       res.tag = "select"
-      -- else
+    else
       --   res.tag = "input"
     end
   end
@@ -611,7 +662,7 @@ function BaseField:validate(value)
     if value ~= nil then
       if err == nil then
       elseif value == err then
-        -- 代表保持原值,跳过此阶段的所有验证
+        -- keep the value, skip the rest validations
         return value
       else
         return nil, err, index
@@ -628,10 +679,12 @@ end
 
 ---@return any
 function BaseField:get_default()
-  if type(self.default) ~= "function" then
-    return self.default
-  else
+  if type(self.default) == "function" then
     return self.default()
+  elseif type(self.default) == "table" then
+    return clone(self.default)
+  else
+    return self.default
   end
 end
 
@@ -651,6 +704,7 @@ end
 ---@param value DBValue
 ---@return DBValue
 function BaseField:to_form_value(value)
+  -- Fields like alioss* need this
   return value
 end
 
@@ -709,7 +763,7 @@ function StringField:init(options)
   if self.default == nil and not self.primary_key and not self.unique then
     self.default = ""
   end
-  if self.choices and #self.choices > 0 then
+  if self.choices and isarray(self.choices) and #self.choices > 0 then
     local n = get_max_choice_length(self.choices)
     assert(n > 0, "invalid string choices(empty choices or zero length value):" .. self.name)
     local m = self.length or self.maxlength
@@ -796,10 +850,12 @@ end
 ---@class TextField:BaseField
 ---@field type "text"
 ---@field db_type "text"
----@field trim? boolean remove head and tail spaces
 ---@field pattern? string regex expression string that passed to ngx.re.match
+---@field length? integer
+---@field minlength? integer
+---@field maxlength? integer
 TextField = BaseField:class {
-  option_names = { "trim", "pattern" },
+  option_names = { "pattern", "length", "minlength", "maxlength" },
 }
 function TextField:init(options)
   BaseField.init(self, dict({
@@ -812,6 +868,16 @@ function TextField:init(options)
   if self.attrs and self.attrs.auto_size == nil then
     self.attrs.auto_size = false
   end
+end
+
+function TextField:get_validators(validators)
+  for _, e in ipairs { "pattern", "length", "minlength", "maxlength" } do
+    if self[e] then
+      table_insert(validators, 1, Validator[e](self[e], self:get_error_message(e)))
+    end
+  end
+  table_insert(validators, 1, Validator.string)
+  return BaseField.get_validators(self, validators)
 end
 
 ---@class SfzhField:StringField
@@ -1157,7 +1223,7 @@ end
 ---@field type "foreignkey"
 ---@field private FK_TYPE_NOT_DEFIEND table
 ---@field convert function
----@field reference Xodel|string
+---@field reference Xodel
 ---@field reference_column? string
 ---@field reference_label_column? string
 ---@field reference_url? string
@@ -1209,7 +1275,7 @@ end
 
 ---@param fk_model Xodel
 function ForeignkeyField:setup_with_fk_model(fk_model)
-  --setup: reference_column, reference_label_column, db_type
+  -- setup: reference_column, reference_label_column, db_type
   assert(type(fk_model) == "table" and fk_model.__is_model_class__,
     string_format("a foreignkey must define a reference model. not %s(type: %s)", fk_model, type(fk_model)))
   local rc = self.reference_column or fk_model.primary_key or fk_model.DEFAULT_PRIMARY_KEY or "id"
@@ -1373,7 +1439,7 @@ local function skip_validate_when_string(v)
 end
 
 local function check_array_type(v)
-  if type(v) ~= "table" then
+  if not isarray(v) then
     return nil, "value of array field must be a array"
   else
     return v
@@ -1394,7 +1460,7 @@ local function non_empty_array_required(message)
 end
 
 ---@class BaseArrayField:JsonField
----@field field AnyField
+---@field field? AnyField
 local BaseArrayField = JsonField:class {}
 
 function BaseArrayField:init(options)
@@ -1428,7 +1494,7 @@ end
 
 ---@class ArrayField:BaseArrayField
 ---@field type "array"
----@field field AnyField
+---@field field? AnyField
 ArrayField = BaseArrayField:class {
   option_names = { 'field', 'min' },
 }
@@ -1437,50 +1503,53 @@ function ArrayField:init(options)
     type = "array",
     min = 1,
   }, options))
-  assert(type(self.field) == 'table', string_format('array field "%s" must define field', self.name))
-  self.field = normalize_field_shortcuts(self.field)
-  if not self.field.name then
-    self.field.name = self.name
+  if type(self.field) == 'table' then
+    self.field = normalize_field_shortcuts(self.field)
+    if not self.field.name then
+      --为了解决validateFunction内array field覆盖parent值的问题
+      self.field.name = self.name
+    end
+    local fields = get_fields()
+    local array_field_cls = fields[self.field.type or 'string']
+    if not array_field_cls then
+      error("invalid array field type: " .. self.field.type)
+    end
+    self.field = array_field_cls:create_field(self.field)
   end
-  local fields = get_fields()
-  local array_field_cls = fields[self.field.type or 'string']
-  if not array_field_cls then
-    error("invalid array field type: " .. self.field.type)
-  end
-  self.field = array_field_cls:create_field(self.field)
 end
 
 function ArrayField:get_options()
   local options = BaseField.get_options(self)
-  local array_field_options = self.field:get_options()
-  options.field = array_field_options
+  if self.field then
+    local array_field_options = self.field:get_options()
+    options.field = array_field_options
+  end
   return options
 end
 
 function ArrayField:get_validators(validators)
-  local function array_validator(value)
-    local res = {}
-    local field = self.field
-    for i, e in ipairs(value) do
-      local val, err = field:validate(e)
-      if err ~= nil then
-        return nil, err, i
-      end
-      if field.default and (val == nil or val == "") then
-        if type(field.default) ~= "function" then
-          val = field.default
-        else
-          val, err = field.default()
+  if self.field then
+    local function array_validator(value)
+      local res = {}
+      local field = self.field
+      ---@cast field -nil
+      for i, e in ipairs(value) do
+        local val, err = field:validate(e)
+        if err ~= nil then
+          return nil, err, i
+        end
+        if field.default and (val == nil or val == "") then
+          val, err = field:get_default()
           if val == nil then
             return nil, err, i
           end
         end
+        res[i] = val
       end
-      res[i] = val
+      return res
     end
-    return res
+    table_insert(validators, 1, array_validator)
   end
-  table_insert(validators, 1, array_validator)
   return BaseArrayField.get_validators(self, validators)
 end
 
@@ -1513,6 +1582,7 @@ function TableField:init(options)
       abstract = self.model.abstract,
       admin = self.model.admin,
       table_name = self.model.table_name,
+      class_name = self.model.class_name,
       label = self.model.label,
       fields = self.model.fields,
       field_names = self.model.field_names,
@@ -1631,7 +1701,7 @@ function AliossField:init(options)
 end
 
 ---@param self AliossField|AliossListField
----@param options table
+---@param options AliossPayloadArgs
 function AliossField.setup(self, options)
   local size = options.size or ALIOSS_SIZE
   self.key_secret = options.key_secret
