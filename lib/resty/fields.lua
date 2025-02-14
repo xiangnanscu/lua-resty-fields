@@ -422,6 +422,7 @@ local base_option_names = {
 ---@overload fun(options: table): BaseField
 ---@operator add(BaseField): string
 ---@operator sub(BaseField): string
+---@diagnostic disable-next-line: unknown-operator
 ---@operator eq(BaseField): string
 ---@field private __call function
 ---@field private __is_field_class__ true
@@ -441,6 +442,7 @@ local base_option_names = {
 ---@field default? any
 ---@field hint? string
 ---@field error_messages? table
+---@field group? boolean
 ---@field choices? Array
 ---@field strict? boolean
 ---@field choices_url? string
@@ -537,7 +539,7 @@ function BaseField:init(options)
       self.null = true
     end
   end
-  if type(self.choices) == 'table' or type(self.choices) == 'string' then
+  if not self.group and type(self.choices) == 'table' or type(self.choices) == 'string' then
     self.choices = get_choices(self.choices)
   end
   if self.autocomplete then
@@ -589,7 +591,7 @@ function BaseField:get_validators(validators)
   --   end
   --   table_insert(validators, dynamic_choices_validator)
   -- end
-  if type(self.choices) == 'table' and #self.choices > 0 and (self.strict == nil or self.strict) then
+  if not self.group and type(self.choices) == 'table' and #self.choices > 0 and (self.strict == nil or self.strict) then
     self.static_choice_validator = get_choices_validator(
       self.choices,
       self:get_error_message('choices'),
@@ -1224,8 +1226,8 @@ end
 ---@field private FK_TYPE_NOT_DEFIEND table
 ---@field convert function
 ---@field reference Xodel
----@field reference_column? string
----@field reference_label_column? string
+---@field reference_column string
+---@field reference_label_column string
 ---@field reference_url? string
 ---@field on_delete? "CASCADE"|"NO ACTION"|"cascade"|"no action" default CASCADE
 ---@field on_update? "CASCADE"|"NO ACTION"|"cascade"|"no action" default CASCADE
@@ -1235,6 +1237,9 @@ end
 ---@field keyword_query_name? string default keyword
 ---@field limit_query_name? string default limit
 ---@field json_dereference? boolean whether defererence in json
+---@field related_name string
+---@field related_query_name string
+---@field is_multiple boolean OneToOneField is not multiple
 ForeignkeyField = BaseField:class {
   option_names = {
     "json_dereference",
@@ -1249,6 +1254,9 @@ ForeignkeyField = BaseField:class {
     "models_url_name",
     "keyword_query_name",
     "limit_query_name",
+    "related_name",
+    "related_query_name",
+    "is_multiple",
   },
 }
 function ForeignkeyField:init(options)
@@ -1485,7 +1493,7 @@ function BaseArrayField:get_empty_value_to_update()
 end
 
 function BaseArrayField:to_form_value(value)
-  if isarray(value) then
+  if type(value) == 'table' and isarray(value) then
     return clone(value)
   else
     return {}
@@ -1560,12 +1568,15 @@ end
 ---@class TableField:BaseArrayField
 ---@field type "table"
 ---@field model Xodel
+---@field names? string[]
+---@field form_names? string[]
+---@field cascade_column? string
 ---@field columns? string[]
 ---@field max_rows? integer
 ---@field uploadable? boolean
 ---@field ModelClass? Xodel
 TableField = BaseArrayField:class {
-  option_names = { 'model', 'max_rows', 'uploadable', 'columns' },
+  option_names = { 'model', 'max_rows', 'uploadable', 'names', 'columns', 'form_names', 'cascade_column' },
 }
 function TableField:init(options)
   BaseArrayField.init(self, dict({
@@ -1594,7 +1605,7 @@ function TableField:init(options)
   if not self.default or self.default == "" then
     self.default = make_empty_array
   end
-  if not self.model.table_name then
+  if not self.model.abstract and not self.model.table_name then
     self.model:materialize_with_table_name { table_name = self.name, label = self.label }
   end
 end
@@ -1602,15 +1613,17 @@ end
 function TableField:get_validators(validators)
   local function validate_by_each_field(rows)
     local err
+    local res = {}
+    local validate_names = self.names or self.form_names
     for i, row in ipairs(rows) do
       assert(type(row) == "table", "elements of table field must be table")
-      row, err = self.model:validate_create(row)
+      row, err = self.model:validate_create(row, validate_names)
       if row == nil then
         return nil, err, i
       end
-      rows[i] = row
+      res[i] = row
     end
-    return rows
+    return res
   end
 
   table_insert(validators, 1, validate_by_each_field)
@@ -1644,8 +1657,7 @@ function TableField:load(rows)
   return Array(rows)
 end
 
-local ALIOSS_BUCKET = getenv("ALIOSS_BUCKET") or ""
-local ALIOSS_REGION = getenv("ALIOSS_REGION") or ""
+local ALIOSS_URL = getenv("ALIOSS_URL") or ""
 local ALIOSS_SIZE = getenv("ALIOSS_SIZE") or "1M"
 local ALIOSS_LIFETIME = tonumber(getenv("ALIOSS_LIFETIME") or 30) --[[@as integer]]
 
@@ -1709,9 +1721,7 @@ function AliossField.setup(self, options)
   self.size_arg = size
   self.size = byte_size_parser(size)
   self.lifetime = options.lifetime or ALIOSS_LIFETIME
-  self.upload_url = string_format("//%s.%s.aliyuncs.com/",
-    options.bucket or ALIOSS_BUCKET,
-    options.region or ALIOSS_REGION)
+  self.upload_url = options.upload_url or ALIOSS_URL
 end
 
 function AliossField:get_options()
