@@ -75,7 +75,7 @@ end
 ---@alias AnyField
 ---| StringField
 ---| UUIDField
----| SfzhField
+---| IdCardField
 ---| EmailField
 ---| PasswordField
 ---| TextField
@@ -192,7 +192,7 @@ end
 local BaseField
 local StringField
 local UUIDField
-local SfzhField
+local IdCardField
 local EmailField
 local PasswordField
 local TextField
@@ -218,7 +218,7 @@ local function get_fields()
   return {
     string = StringField,
     uuid = UUIDField,
-    sfzh = SfzhField,
+    id_card = IdCardField,
     email = EmailField,
     password = PasswordField,
     text = TextField,
@@ -264,7 +264,7 @@ local DEFAULT_BOOLEAN_CHOICES = { { label = '是', value = true }, { label = '�
 local VALID_FOREIGN_KEY_TYPES = {
   foreignkey = tostring,
   string = tostring,
-  sfzh = tostring,
+  id_card = tostring,
   integer = Validator.integer,
   float = tonumber,
   datetime = Validator.datetime,
@@ -432,6 +432,7 @@ local base_option_names = {
 ---@field type string
 ---@field db_type? string
 ---@field name string
+---@field _column_token string
 ---@field label? string
 ---@field primary_key? boolean
 ---@field null? boolean
@@ -539,7 +540,7 @@ function BaseField:init(options)
       self.null = true
     end
   end
-  if not self.group and type(self.choices) == 'table' or type(self.choices) == 'string' then
+  if not self.group and (type(self.choices) == 'table' or type(self.choices) == 'string') then
     self.choices = get_choices(self.choices)
   end
   if self.autocomplete then
@@ -741,7 +742,7 @@ end
 ---@field maxlength? integer
 ---@field input_type? string
 StringField = BaseField:class {
-  compact = false,
+  compact = true,
   trim = true,
   option_names = {
     "compact",
@@ -754,15 +755,13 @@ StringField = BaseField:class {
   },
 }
 function StringField:init(options)
-  if not options.choices and not options.length and not options.maxlength then
+  if not options.choices and not options.length and not options.maxlength and not self.maxlength then
     error(string_format("field '%s' must define maxlength or choices or length", options.name))
   end
   BaseField.init(self, dict({
     type = "string",
     db_type = "varchar",
   }, options))
-  --TODO:考虑default为函数时,数据库层面应该为空字符串.从migrate.lua的serialize_defaut特定
-  --可以考虑default函数传入nil时认定为migrate的情形, 自行返回空字符串
   if self.default == nil and not self.primary_key and not self.unique then
     self.default = ""
   end
@@ -883,16 +882,16 @@ function TextField:get_validators(validators)
   return BaseField.get_validators(self, validators)
 end
 
----@class SfzhField:StringField
----@field type "sfzh"
+---@class IdCardField:StringField
+---@field type "id_card"
 ---@field db_type "varchar"
-SfzhField = StringField:class {
+IdCardField = StringField:class {
   option_names = { unpack(StringField.option_names) },
 }
 
-function SfzhField:init(options)
+function IdCardField:init(options)
   StringField.init(self, dict({
-    type = "sfzh",
+    type = "id_card",
     db_type = "varchar",
     length = 18
   }, options))
@@ -900,8 +899,8 @@ end
 
 ---@param validators function[]
 ---@return function[]
-function SfzhField:get_validators(validators)
-  table_insert(validators, 1, Validator.sfzh)
+function IdCardField:get_validators(validators)
+  table_insert(validators, 1, Validator.id_card)
   return StringField.get_validators(self, validators)
 end
 
@@ -1294,7 +1293,7 @@ function ForeignkeyField:setup_with_fk_model(fk_model)
     fk_model.table_name or "[TABLE NAME NOT DEFINED YET]"))
   self.reference_column = rc
   local rlc = self.reference_label_column or fk_model.referenced_label_column or rc
-  local _fk, _fk_of_fk = rlc:match("(%w+)__(%w+)")
+  local _fk = rlc:match("(%w+)__(%w+)")
   local check_key = _fk or rlc
   assert(fk_model.fields[check_key], string_format("invalid foreignkey label name %s for foreign model %s",
     check_key,
@@ -1565,16 +1564,16 @@ end
 ---@class TableField:BaseArrayField
 ---@field type "table"
 ---@field model Xodel
----@field names? string[]
----@field form_names? string[]
+---@field names? string[] -- 指定校验字段,有些字段如id你不想在表单显示,但是又想向后端发送的值
+---@field form_names? string[] -- 指定表单字段
 ---@field cascade_column? string
----@field columns? string[]
+---@field columns? string[] -- 指定表格列
 ---@field max_rows? integer
 ---@field uploadable? boolean
 ---@field ModelClass? Xodel
 TableField = BaseArrayField:class {
   max_rows = TABLE_MAX_ROWS,
-  option_names = { 'model', 'max_rows', 'uploadable', 'names', 'columns', 'form_names', 'cascade_column' },
+  option_names = { 'model', 'max_rows', 'uploadable', 'names', 'columns', 'detail_columns', 'form_names', 'cascade_column' },
 }
 function TableField:init(options)
   BaseArrayField.init(self, dict({
@@ -1609,14 +1608,14 @@ end
 
 function TableField:get_validators(validators)
   local function validate_by_each_field(rows)
-    local err
     local res = {}
     local validate_names = self.names or self.form_names
     for i, row in ipairs(rows) do
       assert(type(row) == "table", "elements of table field must be table")
-      row, err = self.model:validate_create(row, validate_names)
-      if row == nil then
-        return nil, err, i
+      local ok
+      ok, row = pcall(self.model.validate_create, self.model, row, validate_names)
+      if not ok then
+        return nil, row, i
       end
       res[i] = row
     end
